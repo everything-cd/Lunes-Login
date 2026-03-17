@@ -14,11 +14,16 @@ from pyvirtualdisplay import Display
 登录成功后：
   0) 从登录成功后的“Manage Servers”界面里，找到 <a href="/servers/63585" class="server-card">
      - 提取 href 里的数字作为 server_id（例如 63585）
-     - 点击该 a（或 open 对应 URL），进入 server 控制台页（等 “Now managing” 出现）
+     - 点击该 a（或 open 对应 URL），进入 server 控制台页
   1) server 页停留 4-6 秒
   2) 登录成功后截图
   3) 发 TG：截图 + 说明文字
   4) 不执行退出
+
+注意：
+- “登录成功” 与 “进入 server 页成功” 分开统计
+- 只要出现 Welcome back / logout 按钮，就判定为登录成功
+- server 页即使失败，也不会把整次登录记为失败
 
 环境变量：ACCOUNTS_BATCH（多行，每行一套，英文逗号分隔）
   1) 不发 TG：email,password
@@ -31,7 +36,6 @@ a2@example.com,pass2,123456:AAxxxxxx,123456789
 """
 
 LOGIN_URL = "https://betadash.lunes.host/login?next=/"
-HOME_URL = "https://betadash.lunes.host/"
 SERVER_URL_TPL = "https://betadash.lunes.host/servers/{server_id}"
 
 SCREENSHOT_DIR = "screenshots"
@@ -42,13 +46,13 @@ EMAIL_SEL = "#email"
 PASS_SEL = "#password"
 SUBMIT_SEL = 'button.submit-btn[type="submit"]'
 
-# 登录成功后出现的退出按钮（这里只保留给“登录成功判定”使用，不再点击）
+# 登录成功特征之一（这里只用于判定，不再点击）
 LOGOUT_SEL = 'a[href="/logout"].action-btn.ghost'
 
-# server 页面加载成功标志：出现 “Now managing”
+# server 页面加载标志之一
 NOW_MANAGING_XPATH = 'xpath=//p[contains(normalize-space(.), "Now managing")]'
 
-# 服务器卡片：<a href="/servers/63585" class="server-card">
+# 服务器卡片
 SERVER_CARD_LINK_SEL = 'a.server-card[href^="/servers/"]'
 
 
@@ -120,6 +124,7 @@ def tg_send_photo(
     chat_id = (chat_id or "").strip()
     if not token or not chat_id:
         return
+
     if not photo_path or not os.path.exists(photo_path):
         print(f"⚠️ TG 图片发送失败：文件不存在 -> {photo_path}")
         tg_send_text(caption, token, chat_id)
@@ -132,7 +137,7 @@ def tg_send_photo(
                 url,
                 data={
                     "chat_id": chat_id,
-                    "caption": caption[:1024],  # TG caption 长度限制
+                    "caption": caption[:1024],
                     "disable_notification": False,
                 },
                 files={"photo": f},
@@ -140,7 +145,6 @@ def tg_send_photo(
             ).raise_for_status()
     except Exception as e:
         print(f"⚠️ TG 图片发送失败：{e}")
-        # 图片失败时兜底发送文字
         tg_send_text(caption, token, chat_id)
 
 
@@ -157,7 +161,6 @@ def build_accounts_from_env() -> List[Dict[str, str]]:
 
         parts = [p.strip() for p in line.split(",")]
 
-        # 格式：2列 or 4列
         if len(parts) not in (2, 4):
             raise RuntimeError(
                 f"❌ ACCOUNTS_BATCH 第 {idx} 行格式不对（必须是 email,password 或 "
@@ -187,9 +190,6 @@ def build_accounts_from_env() -> List[Dict[str, str]]:
 
 
 def _has_cf_clearance(sb: SB) -> bool:
-    """
-    通过检查 Cloudflare 下发的 cf_clearance cookie 来判断是否过盾（仅用于日志/诊断）
-    """
     try:
         cookies = sb.get_cookies()
         cf_clearance = next((c["value"] for c in cookies if c.get("name") == "cf_clearance"), None)
@@ -200,9 +200,6 @@ def _has_cf_clearance(sb: SB) -> bool:
 
 
 def _try_click_captcha(sb: SB, stage: str):
-    """
-    尝试自动点击 Turnstile / Cloudflare Challenge（能点则点）
-    """
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
@@ -211,11 +208,6 @@ def _try_click_captcha(sb: SB, stage: str):
 
 
 def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
-    """
-    登录成功特征：
-      - h1.hero-title 包含 Welcome back
-      - 或 LOGOUT 按钮可见
-    """
     welcome_text = None
     try:
         if sb.is_element_visible("h1.hero-title"):
@@ -235,28 +227,22 @@ def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
 
 
 def _extract_server_id_from_href(href: str) -> Optional[str]:
-    """
-    从 "/servers/63585" 或 "https://.../servers/63585" 提取 63585
-    """
     if not href:
         return None
     m = re.search(r"/servers/(\d+)", href)
     return m.group(1) if m else None
 
 
-def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
+def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool, str]:
     """
-    在登录成功后的页面里：
-      - 找到 a.server-card[href^="/servers/"]
-      - 提取 server_id
-      - 点击这个 a 进入 server 页（并等待 Now managing）
-    返回 (server_id, entered_ok)
+    返回:
+      (server_id, entered_ok, reason)
     """
     try:
         sb.wait_for_element_visible(SERVER_CARD_LINK_SEL, timeout=25)
     except Exception:
         screenshot(sb, f"server_card_not_found_{int(time.time())}.png")
-        return None, False
+        return None, False, "server-card 未出现"
 
     try:
         href = sb.get_attribute(SERVER_CARD_LINK_SEL, "href") or ""
@@ -264,59 +250,83 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
         href = ""
 
     server_id = _extract_server_id_from_href(href)
-
     if not server_id:
         screenshot(sb, f"server_id_extract_failed_{int(time.time())}.png")
-        return None, False
+        return None, False, "无法从 href 提取 server_id"
+
+    server_url = SERVER_URL_TPL.format(server_id=server_id)
 
     try:
         print(f"🧭 提取到 server_id={server_id}，点击 server-card 跳转...")
         sb.scroll_to(SERVER_CARD_LINK_SEL)
         time.sleep(0.3)
         sb.click(SERVER_CARD_LINK_SEL)
-
-        sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
-        return server_id, True
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 点击跳转失败，改为直接打开：{server_url} | {e}")
         try:
-            server_url = SERVER_URL_TPL.format(server_id=server_id)
-            print(f"⚠️ 点击跳转失败，改为直接打开：{server_url}")
             sb.open(server_url)
-            sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
-            return server_id, True
+        except Exception as e2:
+            screenshot(sb, f"goto_server_open_failed_{int(time.time())}.png")
+            return server_id, False, f"打开 server_url 失败: {e2}"
+
+    for _ in range(30):
+        try:
+            cur = (sb.get_current_url() or "").strip()
         except Exception:
-            screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
-            return server_id, False
+            cur = ""
+
+        if f"/servers/{server_id}" in cur:
+            try:
+                if sb.is_element_visible(NOW_MANAGING_XPATH):
+                    return server_id, True, "URL 正确，且 Now managing 已出现"
+            except Exception:
+                pass
+
+            try:
+                if sb.is_element_visible("body"):
+                    return server_id, True, "URL 已进入 server 页"
+            except Exception:
+                pass
+
+        time.sleep(1)
+
+    screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
+    return server_id, False, "30 秒内未稳定识别到 server 页"
 
 
-def _post_login_visit(sb: SB) -> Tuple[Optional[str], bool]:
+def _post_login_visit(sb: SB) -> Tuple[Optional[str], bool, str]:
     """
     登录成功后：
-      0) 从 Manage Servers 卡片中提取 server_id，并进入 server 页（等待 Now managing）
-      1) server 页停留 4-6 秒
-    返回 (server_id, ok)
+      0) 提取 server_id，并尝试进入 server 页
+      1) 若进入成功，停留 4-6 秒
+    返回：
+      (server_id, server_enter_ok, reason)
     """
-    server_id, entered_ok = _find_server_id_and_go_server_page(sb)
-    if not entered_ok:
-        return server_id, False
+    server_id, entered_ok, reason = _find_server_id_and_go_server_page(sb)
 
-    stay1 = random.randint(4, 6)
-    print(f"⏳ 服务器页停留 {stay1} 秒...")
-    time.sleep(stay1)
+    if entered_ok:
+        stay1 = random.randint(4, 6)
+        print(f"⏳ 服务器页停留 {stay1} 秒...")
+        time.sleep(stay1)
 
-    return server_id, True
+    return server_id, entered_ok, reason
 
 
 def login_then_flow_one_account(
     email: str, password: str
-) -> Tuple[str, Optional[str], bool, str, Optional[str], Optional[str]]:
+) -> Tuple[str, Optional[str], bool, str, Optional[str], Optional[str], bool, str]:
     """
     返回：
-      (status, welcome_text, has_cf_clearance, current_url, server_id, screenshot_path)
-
-    status:
-      - "OK"   登录成功
-      - "FAIL" 登录失败
+      (
+        status,              # OK / FAIL（仅代表登录是否成功）
+        welcome_text,
+        has_cf_clearance,
+        current_url,
+        server_id,
+        screenshot_path,
+        server_enter_ok,
+        server_enter_reason,
+      )
     """
     with SB(uc=True, locale="en", test=True) as sb:
         print("🚀 浏览器启动（UC Mode）")
@@ -330,7 +340,7 @@ def login_then_flow_one_account(
             sb.wait_for_element_visible(SUBMIT_SEL, timeout=25)
         except Exception:
             url_now = sb.get_current_url() or ""
-            return "FAIL", None, _has_cf_clearance(sb), url_now, None, None
+            return "FAIL", None, _has_cf_clearance(sb), url_now, None, None, False, "登录页表单未出现"
 
         sb.clear(EMAIL_SEL)
         sb.type(EMAIL_SEL, email)
@@ -357,15 +367,10 @@ def login_then_flow_one_account(
             time.sleep(1)
 
         if not logged_in:
-            return "FAIL", welcome_text, has_cf, current_url, None, None
+            return "FAIL", welcome_text, has_cf, current_url, None, None, False, "未检测到登录成功标志"
 
-        server_id, post_ok = _post_login_visit(sb)
-        if not post_ok:
-            try:
-                current_url = (sb.get_current_url() or "").strip()
-            except Exception:
-                pass
-            return "FAIL", welcome_text, has_cf, current_url, server_id, None
+        # 到这里即视为登录成功
+        server_id, server_enter_ok, server_enter_reason = _post_login_visit(sb)
 
         try:
             current_url = (sb.get_current_url() or "").strip()
@@ -375,7 +380,7 @@ def login_then_flow_one_account(
         shot_name = f"{safe_filename(email)}_{server_id or 'no_server'}_{int(time.time())}.png"
         shot_path = screenshot(sb, shot_name)
 
-        return "OK", welcome_text, has_cf, current_url, server_id, shot_path
+        return "OK", welcome_text, has_cf, current_url, server_id, shot_path, server_enter_ok, server_enter_reason
 
 
 def main():
@@ -399,9 +404,16 @@ def main():
             print("=" * 70)
 
             try:
-                status, welcome_text, has_cf, url_now, server_id, shot_path = login_then_flow_one_account(
-                    email, password
-                )
+                (
+                    status,
+                    welcome_text,
+                    has_cf,
+                    url_now,
+                    server_id,
+                    shot_path,
+                    server_enter_ok,
+                    server_enter_reason,
+                ) = login_then_flow_one_account(email, password)
 
                 if status == "OK":
                     ok += 1
@@ -410,6 +422,8 @@ def main():
                         f"账号：{safe_email}\n"
                         f"server_id：{server_id or '未提取到'}\n"
                         f"welcome：{welcome_text or '未读取到'}\n"
+                        f"server页面：{'✅ 成功' if server_enter_ok else '❌ 失败'}\n"
+                        f"说明：{server_enter_reason}\n"
                         f"当前页：{url_now}\n"
                         f"cf_clearance：{'OK' if has_cf else 'NONE'}"
                     )
@@ -423,10 +437,10 @@ def main():
                     msg = (
                         f"❌ Lunes BetaDash 登录失败\n"
                         f"账号：{safe_email}\n"
-                        f"server_id：{server_id or '未提取到'}\n"
                         f"welcome：{welcome_text or '未检测到'}\n"
                         f"当前页：{url_now}\n"
-                        f"cf_clearance：{'OK' if has_cf else 'NONE'}"
+                        f"cf_clearance：{'OK' if has_cf else 'NONE'}\n"
+                        f"说明：{server_enter_reason}"
                     )
                     print(msg)
 
@@ -440,14 +454,13 @@ def main():
                 if tg_token and tg_chat:
                     tg_send_text(msg, tg_token, tg_chat)
 
-            # 账号之间冷却
             time.sleep(5)
             if i < len(accounts):
                 time.sleep(5)
 
         summary = f"📌 本次批量完成：登录成功 {ok} / 失败 {fail}"
         print("\n" + summary)
-        # 不再发送 TG summary，避免一账号两条消息
+        # 不再发送 TG summary，避免重复两条通知
 
     finally:
         if display:
