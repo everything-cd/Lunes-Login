@@ -1,4 +1,4 @@
-name: lunes Auto Login
+name: Lunes 自动登录
 
 on:
   schedule:
