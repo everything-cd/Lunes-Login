@@ -35,9 +35,6 @@ jobs:
       - name: 🚀 Run renew script
         env:
           FREESERVER_COOKIE: ${{ secrets.FREESERVER_COOKIE }}
-          FREESERVER_MANAGE_URL: ${{ secrets.FREESERVER_MANAGE_URL }}
-          FREESERVER_DASHBOARD_URL: ${{ secrets.FREESERVER_DASHBOARD_URL }}
-          FREESERVER_LOGIN_URL: ${{ secrets.FREESERVER_LOGIN_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
