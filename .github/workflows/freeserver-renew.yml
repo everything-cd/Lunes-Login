@@ -22,10 +22,28 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: 🛡️ 启动 Gost 代理转发
+        run: |
+          wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          chmod +x gost-linux-amd64-2.11.5
+          mv gost-linux-amd64-2.11.5 gost
+
+          echo "启动 Gost 转发隧道..."
+          nohup ./gost -L http://:8080 -F ${{ secrets.GOST_PROXY }} > gost.log 2>&1 &
+          sleep 3
+
+          echo "测试本地代理连通性..."
+          curl -x http://127.0.0.1:8080 https://api.ipify.org -v
+
       - name: 🌐 Setup Chrome
         uses: browser-actions/setup-chrome@v1
 
       - name: 📦 Install dependencies
+        env:
+          HTTP_PROXY: http://127.0.0.1:8080
+          HTTPS_PROXY: http://127.0.0.1:8080
+          ALL_PROXY: http://127.0.0.1:8080
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
@@ -37,8 +55,12 @@ jobs:
           FREESERVER_COOKIE: ${{ secrets.FREESERVER_COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+          HTTP_PROXY: http://127.0.0.1:8080
+          HTTPS_PROXY: http://127.0.0.1:8080
+          ALL_PROXY: http://127.0.0.1:8080
         run: |
-          python renew_freeserver.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python renew_freeserver.py
 
       - name: 📸 Upload screenshots
         if: always()
@@ -46,6 +68,14 @@ jobs:
         with:
           name: freeserver-screenshots
           path: screenshots/*.png
+          if-no-files-found: ignore
+
+      - name: 📄 Upload gost log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gost-log
+          path: gost.log
           if-no-files-found: ignore
 
       - name: ⏱️ Commit time.txt to repo
