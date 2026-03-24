@@ -24,14 +24,13 @@ TG_BOT_TOKEN = (os.getenv("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.getenv("TG_CHAT_ID") or "").strip()
 
 # 本地 Gost 转发后的代理地址
-# GitHub Actions 中会传入：127.0.0.1:8080
+# 例如：127.0.0.1:8080
 LOCAL_HTTP_PROXY = (os.getenv("LOCAL_HTTP_PROXY") or "127.0.0.1:8080").strip()
 
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 WAIT_TIMEOUT = 25
-
 COOKIE_NAME = "connect.sid"
 
 SWAL_CONFIRM_SELECTORS = [
@@ -66,6 +65,24 @@ def screenshot(sb: SB, name: str) -> str:
     return path
 
 
+def get_requests_proxies():
+    """
+    显式给 requests 使用本地 Gost 代理。
+    这样即使运行脚本时 unset 了 HTTP_PROXY，也不影响 TG 通知。
+    """
+    if not LOCAL_HTTP_PROXY:
+        return None
+
+    proxy_url = LOCAL_HTTP_PROXY
+    if not proxy_url.startswith("http://") and not proxy_url.startswith("https://"):
+        proxy_url = f"http://{proxy_url}"
+
+    return {
+        "http": proxy_url,
+        "https": proxy_url,
+    }
+
+
 def tg_send_text(text: str):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
@@ -79,6 +96,7 @@ def tg_send_text(text: str):
                 "text": text,
                 "disable_web_page_preview": True,
             },
+            proxies=get_requests_proxies(),
             timeout=20,
         ).raise_for_status()
     except Exception as e:
@@ -105,6 +123,7 @@ def tg_send_photo(photo_path: str, caption: str):
                     "disable_notification": False,
                 },
                 files={"photo": f},
+                proxies=get_requests_proxies(),
                 timeout=60,
             ).raise_for_status()
     except Exception as e:
@@ -128,7 +147,6 @@ def get_cookie_candidates(raw_cookie_value: str) -> List[str]:
     candidates: List[str] = []
     decoded = unquote(value)
 
-    # 优先尝试解码后的值，再尝试原始值
     if decoded and decoded not in candidates:
         candidates.append(decoded)
     if value and value not in candidates:
