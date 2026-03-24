@@ -57,7 +57,6 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           LOCAL_HTTP_PROXY: 127.0.0.1:8080
           NO_PROXY: localhost,127.0.0.1,::1
-          no_proxy: localhost,127.0.0.1,::1
           PYTHONIOENCODING: utf-8
         run: |
           unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
