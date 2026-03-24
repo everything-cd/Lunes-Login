@@ -10,25 +10,22 @@ from seleniumbase import SB
 from pyvirtualdisplay import Display
 
 
-FREESERVER_MANAGE_URL = os.getenv(
-    "FREESERVER_MANAGE_URL",
-    "https://dash.freeserver.tw/dashboard/manage/10829",
-).strip()
+# ===== 固定地址，直接写死 =====
+FREESERVER_MANAGE_URL = "https://dash.freeserver.tw/dashboard/manage/10829"
+FREESERVER_DASHBOARD_URL = "https://dash.freeserver.tw/dashboard"
+FREESERVER_LOGIN_URL = "https://dash.freeserver.tw/auth/login"
 
-FREESERVER_DASHBOARD_URL = os.getenv(
-    "FREESERVER_DASHBOARD_URL",
-    "https://dash.freeserver.tw/dashboard",
-).strip()
-
-FREESERVER_LOGIN_URL = os.getenv(
-    "FREESERVER_LOGIN_URL",
-    "https://dash.freeserver.tw/auth/login",
-).strip()
-
+# ===== 环境变量 =====
 FREESERVER_COOKIE = (os.getenv("FREESERVER_COOKIE") or "").strip()
+
+# 可选 TG 通知
+TG_BOT_TOKEN = (os.getenv("TG_BOT_TOKEN") or "").strip()
+TG_CHAT_ID = (os.getenv("TG_CHAT_ID") or "").strip()
 
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+WAIT_TIMEOUT = 25
 
 SWAL_CONFIRM_SELECTORS = [
     'button.swal2-confirm',
@@ -43,8 +40,6 @@ EXTEND_BUTTON_SELECTORS = [
     'xpath=//button[contains(normalize-space(.), "延長到期日")]',
     'xpath=//button[contains(normalize-space(.), "Extend")]',
 ]
-
-WAIT_TIMEOUT = 25
 
 
 def setup_xvfb():
@@ -65,17 +60,15 @@ def screenshot(sb: SB, name: str) -> str:
 
 
 def tg_send_text(text: str):
-    token = (os.getenv("TG_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TG_CHAT_ID") or "").strip()
-    if not token or not chat_id:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
         requests.post(
             url,
             json={
-                "chat_id": chat_id,
+                "chat_id": TG_CHAT_ID,
                 "text": text,
                 "disable_web_page_preview": True,
             },
@@ -86,9 +79,7 @@ def tg_send_text(text: str):
 
 
 def tg_send_photo(photo_path: str, caption: str):
-    token = (os.getenv("TG_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TG_CHAT_ID") or "").strip()
-    if not token or not chat_id:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
 
     if not photo_path or not os.path.exists(photo_path):
@@ -96,13 +87,13 @@ def tg_send_photo(photo_path: str, caption: str):
         tg_send_text(caption)
         return
 
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
     try:
         with open(photo_path, "rb") as f:
             requests.post(
                 url,
                 data={
-                    "chat_id": chat_id,
+                    "chat_id": TG_CHAT_ID,
                     "caption": caption[:1024],
                     "disable_notification": False,
                 },
@@ -170,7 +161,7 @@ def try_inject_cookie_and_login(sb: SB) -> bool:
     candidates: List[str] = []
     decoded = unquote(cookie_value_raw)
 
-    # 先试解码后的值，再试原始值
+    # 优先尝试解码后的值，再尝试原始值
     if decoded and decoded not in candidates:
         candidates.append(decoded)
     if cookie_value_raw and cookie_value_raw not in candidates:
