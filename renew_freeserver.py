@@ -3,7 +3,7 @@ import platform
 import time
 import traceback
 from urllib.parse import unquote, urlparse
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 import requests
 from seleniumbase import SB
@@ -16,6 +16,7 @@ FREESERVER_DASHBOARD_URL = "https://dash.freeserver.tw/dashboard"
 FREESERVER_LOGIN_URL = "https://dash.freeserver.tw/auth/login"
 
 # ===== 环境变量 =====
+# 这里只填 connect.sid 的 value，不要带 "connect.sid="
 FREESERVER_COOKIE = (os.getenv("FREESERVER_COOKIE") or "").strip()
 
 # 可选 TG 通知
@@ -26,6 +27,8 @@ SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 WAIT_TIMEOUT = 25
+
+COOKIE_NAME = "connect.sid"
 
 SWAL_CONFIRM_SELECTORS = [
     'button.swal2-confirm',
@@ -105,22 +108,29 @@ def tg_send_photo(photo_path: str, caption: str):
         tg_send_text(caption)
 
 
-def parse_cookie_string(raw_cookie: str) -> Tuple[str, str]:
+def get_cookie_candidates(raw_cookie_value: str) -> List[str]:
     """
-    只接受这种格式：
-    connect.sid=xxxx
+    FREESERVER_COOKIE 只填 cookie 的 value，不带 connect.sid=
+    例如：
+    s%3AU7SDOqq5TGZbUevDjMHp89nJILa7wB00.CeXEU0slnhYDwaWEzsX%2Fr6S7yrBIumOv2e4%2FU48gTyo
     """
-    if not raw_cookie or "=" not in raw_cookie:
-        raise RuntimeError("❌ FREESERVER_COOKIE 格式错误，必须是 name=value")
+    if not raw_cookie_value:
+        raise RuntimeError("❌ FREESERVER_COOKIE 为空")
 
-    name, value = raw_cookie.split("=", 1)
-    name = name.strip()
-    value = value.strip()
+    value = raw_cookie_value.strip()
+    if not value:
+        raise RuntimeError("❌ FREESERVER_COOKIE 为空白")
 
-    if not name or not value:
-        raise RuntimeError("❌ FREESERVER_COOKIE 存在空的 name 或 value")
+    candidates: List[str] = []
+    decoded = unquote(value)
 
-    return name, value
+    # 优先尝试解码后的值，再尝试原始值
+    if decoded and decoded not in candidates:
+        candidates.append(decoded)
+    if value and value not in candidates:
+        candidates.append(value)
+
+    return candidates
 
 
 def page_looks_like_login(sb: SB) -> bool:
@@ -156,17 +166,7 @@ def open_base_for_cookie(sb: SB):
 
 
 def try_inject_cookie_and_login(sb: SB) -> bool:
-    cookie_name, cookie_value_raw = parse_cookie_string(FREESERVER_COOKIE)
-
-    candidates: List[str] = []
-    decoded = unquote(cookie_value_raw)
-
-    # 优先尝试解码后的值，再尝试原始值
-    if decoded and decoded not in candidates:
-        candidates.append(decoded)
-    if cookie_value_raw and cookie_value_raw not in candidates:
-        candidates.append(cookie_value_raw)
-
+    candidates = get_cookie_candidates(FREESERVER_COOKIE)
     domain = urlparse(FREESERVER_DASHBOARD_URL).netloc
 
     for idx, candidate_value in enumerate(candidates, start=1):
@@ -180,7 +180,7 @@ def try_inject_cookie_and_login(sb: SB) -> bool:
         open_base_for_cookie(sb)
 
         cookie_obj = {
-            "name": cookie_name,
+            "name": COOKIE_NAME,
             "value": candidate_value,
             "domain": domain,
             "path": "/",
