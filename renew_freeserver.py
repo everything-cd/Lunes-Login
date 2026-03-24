@@ -23,6 +23,10 @@ FREESERVER_COOKIE = (os.getenv("FREESERVER_COOKIE") or "").strip()
 TG_BOT_TOKEN = (os.getenv("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.getenv("TG_CHAT_ID") or "").strip()
 
+# 本地 Gost 转发后的代理地址
+# GitHub Actions 中会传入：127.0.0.1:8080
+LOCAL_HTTP_PROXY = (os.getenv("LOCAL_HTTP_PROXY") or "127.0.0.1:8080").strip()
+
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
@@ -290,8 +294,14 @@ def main():
     result_shot: Optional[str] = None
 
     try:
-        with SB(uc=True, locale="zh", test=True) as sb:
+        with SB(
+            uc=True,
+            locale="zh",
+            test=True,
+            proxy=LOCAL_HTTP_PROXY,
+        ) as sb:
             print("🚀 浏览器启动（UC Mode）")
+            print(f"🌐 浏览器代理：{LOCAL_HTTP_PROXY}")
 
             ok = try_inject_cookie_and_login(sb)
             if not ok:
