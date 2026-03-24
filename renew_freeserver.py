@@ -2,6 +2,7 @@ import os
 import platform
 import time
 import traceback
+import subprocess
 from urllib.parse import unquote, urlparse
 from typing import Optional, List
 
@@ -47,6 +48,33 @@ EXTEND_BUTTON_SELECTORS = [
     'xpath=//button[contains(normalize-space(.), "Extend")]',
 ]
 
+EXPAND_POPUP_JS = """
+(function() {
+    var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
+    if (!turnstileInput) return;
+    var el = turnstileInput;
+    for (var i = 0; i < 20; i++) {
+        el = el.parentElement;
+        if (!el) break;
+        var style = window.getComputedStyle(el);
+        if (style.overflow === 'hidden' || style.overflowX === 'hidden' || style.overflowY === 'hidden') {
+            el.style.overflow = 'visible';
+        }
+        el.style.minWidth = 'max-content';
+    }
+    var iframes = document.querySelectorAll('iframe');
+    iframes.forEach(function(iframe) {
+        if (iframe.src && iframe.src.includes('challenges.cloudflare.com')) {
+            iframe.style.width = '300px';
+            iframe.style.height = '65px';
+            iframe.style.minWidth = '300px';
+            iframe.style.visibility = 'visible';
+            iframe.style.opacity = '1';
+        }
+    });
+})();
+"""
+
 
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
@@ -66,10 +94,6 @@ def screenshot(sb: SB, name: str) -> str:
 
 
 def get_requests_proxies():
-    """
-    显式给 requests 使用本地 Gost 代理。
-    这样即使运行脚本时 unset 了 HTTP_PROXY，也不影响 TG 通知。
-    """
     if not LOCAL_HTTP_PROXY:
         return None
 
@@ -174,6 +198,7 @@ def page_looks_like_login(sb: SB) -> bool:
         "登入",
         "login",
         "discord",
+        "sign in",
     ]
 
     return any(hint in page_text for hint in login_hints)
@@ -182,20 +207,241 @@ def page_looks_like_login(sb: SB) -> bool:
 def open_base_for_cookie(sb: SB):
     parsed = urlparse(FREESERVER_LOGIN_URL)
     base_url = f"{parsed.scheme}://{parsed.netloc}/"
-    sb.open(base_url)
+    sb.uc_open_with_reconnect(base_url, reconnect_time=3)
     sb.wait_for_element_visible("body", timeout=WAIT_TIMEOUT)
     time.sleep(1)
 
 
-def try_inject_cookie_and_login(sb: SB) -> bool:
+def xdotool_click(x, y):
+    x, y = int(x), int(y)
+    try:
+        result = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--class", "chrome"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        wids = [w for w in result.stdout.strip().split("\n") if w]
+        if wids:
+            subprocess.run(
+                ["xdotool", "windowactivate", wids[-1]],
+                timeout=2,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.2)
+
+        subprocess.run(["xdotool", "mousemove", str(x), str(y)], timeout=2, check=True)
+        time.sleep(0.15)
+        subprocess.run(["xdotool", "click", "1"], timeout=2, check=True)
+        print(f"📐 坐标点击成功: ({x}, {y})")
+        return True
+    except Exception as e:
+        print(f"⚠️ xdotool 点击失败：{e}")
+        return False
+
+
+def get_turnstile_coords(sb):
+    try:
+        return sb.execute_script("""
+            (function(){
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                        var rect = iframes[i].getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            return {
+                                click_x: Math.round(rect.x + 30),
+                                click_y: Math.round(rect.y + rect.height / 2)
+                            };
+                        }
+                    }
+                }
+
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) {
+                    var container = input.parentElement;
+                    for (var j = 0; j < 5; j++) {
+                        if (!container) break;
+                        var rect = container.getBoundingClientRect();
+                        if (rect.width > 100 && rect.height > 30) {
+                            return {
+                                click_x: Math.round(rect.x + 30),
+                                click_y: Math.round(rect.y + rect.height / 2)
+                            };
+                        }
+                        container = container.parentElement;
+                    }
+                }
+                return null;
+            })()
+        """)
+    except Exception:
+        return None
+
+
+def get_window_offset(sb):
+    try:
+        result = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--class", "chrome"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        wids = [w for w in result.stdout.strip().split("\n") if w]
+        if wids:
+            geo = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", wids[-1]],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            ).stdout
+            geo_dict = {}
+            for line in geo.strip().split("\n"):
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    geo_dict[k.strip()] = int(v.strip())
+
+            win_x = geo_dict.get("X", 0)
+            win_y = geo_dict.get("Y", 0)
+
+            info = sb.execute_script("""
+                (function(){
+                    return {
+                        outer: window.outerHeight,
+                        inner: window.innerHeight
+                    };
+                })()
+            """)
+            toolbar = info["outer"] - info["inner"]
+            if not (30 <= toolbar <= 200):
+                toolbar = 87
+            return win_x, win_y, toolbar
+    except Exception:
+        pass
+
+    try:
+        info = sb.execute_script("""
+            (function(){
+                return {
+                    screenX: window.screenX || 0,
+                    screenY: window.screenY || 0,
+                    outer: window.outerHeight,
+                    inner: window.innerHeight
+                };
+            })()
+        """)
+        toolbar = info["outer"] - info["inner"]
+        if not (30 <= toolbar <= 200):
+            toolbar = 87
+        return info["screenX"], info["screenY"], toolbar
+    except Exception:
+        return 0, 0, 87
+
+
+def turnstile_exists(sb) -> bool:
+    try:
+        return sb.execute_script("""
+            (function(){
+                return (
+                    document.querySelector('input[name="cf-turnstile-response"]') !== null ||
+                    Array.from(document.querySelectorAll('iframe')).some(
+                        f => (f.src || '').includes('cloudflare') || (f.src || '').includes('turnstile')
+                    )
+                );
+            })()
+        """)
+    except Exception:
+        return False
+
+
+def check_turnstile_token(sb) -> bool:
+    try:
+        return sb.execute_script("""
+            (function(){
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                return !!(input && input.value && input.value.length > 20);
+            })()
+        """)
+    except Exception:
+        return False
+
+
+def solve_turnstile(sb) -> bool:
+    for _ in range(3):
+        try:
+            sb.execute_script(EXPAND_POPUP_JS)
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    if check_turnstile_token(sb):
+        print("✅ Turnstile Token 已存在")
+        return True
+
+    coords = get_turnstile_coords(sb)
+    if not coords:
+        print("❌ 无法获取 Turnstile 坐标")
+        return False
+
+    win_x, win_y, toolbar = get_window_offset(sb)
+    abs_x = coords["click_x"] + win_x
+    abs_y = coords["click_y"] + win_y + toolbar
+
+    print(f"🖱️ 点击 Turnstile: ({abs_x}, {abs_y})")
+    if not xdotool_click(abs_x, abs_y):
+        return False
+
+    for _ in range(30):
+        time.sleep(0.5)
+        if check_turnstile_token(sb):
+            print("✅ Cloudflare Turnstile 通过")
+            return True
+
+    print("❌ Cloudflare Turnstile 超时")
+    return False
+
+
+def prepare_cloudflare_session(sb):
+    print("🛡️ 先访问登录页，准备获取 Cloudflare clearance...")
+    sb.uc_open_with_reconnect(FREESERVER_LOGIN_URL, reconnect_time=4)
+    time.sleep(3)
+
+    for _ in range(20):
+        if turnstile_exists(sb):
+            print("🛡️ 检测到 Turnstile")
+            if not solve_turnstile(sb):
+                screenshot(sb, f"cf_failed_{int(time.time())}.png")
+                raise RuntimeError("❌ Cloudflare Turnstile 验证失败")
+            time.sleep(2)
+            break
+        time.sleep(0.5)
+    else:
+        print("ℹ️ 未检测到 Turnstile，继续")
+
+    try:
+        cf_cookie = sb.driver.get_cookie("cf_clearance")
+        if cf_cookie:
+            print("✅ 已获得 cf_clearance")
+        else:
+            print("ℹ️ 当前未读到 cf_clearance，继续尝试后续流程")
+    except Exception:
+        pass
+
+
+def try_inject_cookie_and_login(sb) -> bool:
     candidates = get_cookie_candidates(FREESERVER_COOKIE)
     domain = urlparse(FREESERVER_DASHBOARD_URL).netloc
+
+    # 先让浏览器自己过 Cloudflare，保留 cf_clearance
+    prepare_cloudflare_session(sb)
 
     for idx, candidate_value in enumerate(candidates, start=1):
         print(f"🍪 尝试注入 Cookie（方案 {idx}/{len(candidates)}）")
 
+        # 只删除 connect.sid，不要 delete_all_cookies()
         try:
-            sb.driver.delete_all_cookies()
+            sb.driver.delete_cookie(COOKIE_NAME)
         except Exception:
             pass
 
@@ -207,22 +453,32 @@ def try_inject_cookie_and_login(sb: SB) -> bool:
             "domain": domain,
             "path": "/",
             "secure": True,
+            "httpOnly": True,
         }
 
         try:
             sb.driver.add_cookie(cookie_obj)
+            print("✅ connect.sid 已注入")
         except Exception as e:
             print(f"⚠️ 注入 Cookie 失败：{e}")
             continue
 
         sb.open(FREESERVER_DASHBOARD_URL)
         sb.wait_for_element_visible("body", timeout=WAIT_TIMEOUT)
-        time.sleep(2)
+        time.sleep(3)
+
+        current_url = ""
+        try:
+            current_url = sb.get_current_url()
+        except Exception:
+            pass
+        print(f"🌐 当前URL: {current_url}")
 
         if not page_looks_like_login(sb):
             print("✅ Cookie 登录成功")
             return True
 
+        screenshot(sb, f"login_retry_{idx}_{int(time.time())}.png")
         print("⚠️ 仍然停留在登录页，继续尝试下一个 Cookie 方案")
 
     return False
@@ -310,12 +566,12 @@ def main():
 
     display = setup_xvfb()
     result_shot: Optional[str] = None
+    sb = None
 
     try:
         with SB(
             uc=True,
             locale="zh",
-            test=True,
             proxy=LOCAL_HTTP_PROXY,
         ) as sb:
             print("🚀 浏览器启动（UC Mode）")
@@ -323,7 +579,10 @@ def main():
 
             ok = try_inject_cookie_and_login(sb)
             if not ok:
-                raise RuntimeError("❌ Cookie 登录失败，请更新 FREESERVER_COOKIE")
+                fail_shot = screenshot(sb, f"login_failed_{int(time.time())}.png")
+                raise RuntimeError(
+                    f"❌ Cookie 登录失败，请更新 FREESERVER_COOKIE\n失败截图：{fail_shot}"
+                )
 
             result_shot = run_renew_flow(sb)
 
@@ -335,19 +594,33 @@ def main():
         )
         print(msg)
 
-        if result_shot:
+        if result_shot and os.path.exists(result_shot):
             tg_send_photo(result_shot, msg)
         else:
             tg_send_text(msg)
 
     except Exception as e:
+        fail_shot = None
+
+        try:
+            if sb:
+                fail_shot = screenshot(sb, f"error_{int(time.time())}.png")
+        except Exception as shot_err:
+            print(f"⚠️ 保存异常截图失败：{shot_err}")
+
         err = (
             "❌ FreeServer 自动延长失败\n"
-            f"错误：{e}\n\n"
-            f"{traceback.format_exc()}"
+            f"错误：{e}\n"
+            + (f"失败截图：{fail_shot}\n\n" if fail_shot else "\n")
+            + traceback.format_exc()
         )
         print(err)
-        tg_send_text(err)
+
+        if fail_shot and os.path.exists(fail_shot):
+            tg_send_photo(fail_shot, err[:1024])
+        else:
+            tg_send_text(err)
+
         raise
     finally:
         if display:
