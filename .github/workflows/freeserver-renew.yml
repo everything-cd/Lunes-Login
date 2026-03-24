@@ -45,7 +45,7 @@ jobs:
           ALL_PROXY: http://127.0.0.1:8080
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb xdotool x11-utils scrot
           pip install --upgrade pip
           pip install -r requirements.txt
           seleniumbase install uc_driver
