@@ -56,13 +56,12 @@ jobs:
           FREESERVER_COOKIE: ${{ secrets.FREESERVER_COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
           LOCAL_HTTP_PROXY: 127.0.0.1:8080
-          HTTP_PROXY: http://127.0.0.1:8080
-          HTTPS_PROXY: http://127.0.0.1:8080
-          ALL_PROXY: http://127.0.0.1:8080
+          NO_PROXY: localhost,127.0.0.1,::1
+          no_proxy: localhost,127.0.0.1,::1
           PYTHONIOENCODING: utf-8
         run: |
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python renew_freeserver.py
 
       - name: 📸 Upload screenshots
