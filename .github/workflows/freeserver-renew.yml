@@ -24,17 +24,16 @@ jobs:
 
       - name: 🛡️ 启动 Gost 代理转发
         run: |
-          wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5
-          mv gost-linux-amd64-2.11.5 gost
-
+          wget -O gost.gz https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost.gz
+          chmod +x gost
           echo "启动 Gost 转发隧道..."
-          nohup ./gost -L http://:8080 -F ${{ secrets.GOST_PROXY }} > gost.log 2>&1 &
+          nohup ./gost -L http://:8080 -F "${{ secrets.GOST_PROXY }}" > gost.log 2>&1 &
           sleep 3
 
           echo "测试本地代理连通性..."
-          curl -x http://127.0.0.1:8080 https://api.ipify.org -v
+          curl -fsS -x http://127.0.0.1:8080 https://api.ipify.org
+          echo
 
       - name: 🌐 Setup Chrome
         uses: browser-actions/setup-chrome@v1
