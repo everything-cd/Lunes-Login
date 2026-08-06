@@ -199,16 +199,47 @@ def _has_cf_clearance(sb: SB) -> bool:
         return False
 
 
+def _force_input_value(sb: SB, selector: str, value: str):
+    """通过 JavaScript 强制设置输入框的值并触发 input 事件"""
+    sb.execute_script(
+        """
+        var el = document.querySelector(arguments[0]);
+        if(el) {
+            el.value = arguments[1];
+            // 触发 input 和 change 事件，使框架感知到输入
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        """,
+        selector,
+        value,
+    )
+
+
 def _try_click_captcha(sb: SB, stage: str):
+    """尝试点击 Cloudflare Turnstile 验证框"""
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
+        print(f"   ✅ captcha 点击完成（{stage}）")
     except Exception as e:
-        print(f"⚠️ captcha 点击异常（{stage}）：{e}")
+        print(f"   ⚠️ captcha 点击异常（{stage}）：{e}")
+
+
+def _resolve_cf_challenge(sb: SB):
+    """反复尝试解决 Cloudflare 挑战，直到 cf_clearance 出现"""
+    print("🛡️ 正在解决 Cloudflare 挑战...")
+    for i in range(5):
+        if _has_cf_clearance(sb):
+            print("   ✅ 已有 cf_clearance")
+            return
+        _try_click_captcha(sb, f"循环 {i+1}")
+        time.sleep(2)
+    print("   ⚠️ 多次尝试后仍未获得 cf_clearance")
 
 
 def _detect_login_error(sb: SB) -> str:
-    """检查页面常见的错误提示，返回文本（用于调试）"""
+    """检查页面常见的错误提示"""
     error_selectors = [
         ".alert-danger",
         ".toast-error",
@@ -255,10 +286,6 @@ def _extract_server_id_from_href(href: str) -> Optional[str]:
 
 
 def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool, str]:
-    """
-    返回:
-      (server_id, entered_ok, reason)
-    """
     try:
         sb.wait_for_element_visible(SERVER_CARD_LINK_SEL, timeout=25)
     except Exception:
@@ -316,13 +343,6 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool, str
 
 
 def _post_login_visit(sb: SB) -> Tuple[Optional[str], bool, str]:
-    """
-    登录成功后：
-      0) 提取 server_id，并尝试进入 server 页
-      1) 若进入成功，停留 4-6 秒
-    返回：
-      (server_id, server_enter_ok, reason)
-    """
     server_id, entered_ok, reason = _find_server_id_and_go_server_page(sb)
 
     if entered_ok:
@@ -353,42 +373,56 @@ def login_then_flow_one_account(
         print("🚀 浏览器启动（UC Mode）")
 
         sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5.0)
-        time.sleep(2)
+        time.sleep(3)
 
+        # 1. 先解决 Cloudflare 挑战
+        _resolve_cf_challenge(sb)
+
+        # 2. 确认表单元素可见
         try:
-            sb.wait_for_element_visible(EMAIL_SEL, timeout=25)
-            sb.wait_for_element_visible(PASS_SEL, timeout=25)
-            sb.wait_for_element_visible(SUBMIT_SEL, timeout=25)
+            sb.wait_for_element_visible(EMAIL_SEL, timeout=20)
+            sb.wait_for_element_visible(PASS_SEL, timeout=10)
+            sb.wait_for_element_visible(SUBMIT_SEL, timeout=10)
+            print("✅ 登录表单已加载")
         except Exception:
             url_now = sb.get_current_url() or ""
-            # 表单都没出现，截图返回
             shot_name = f"FAIL_form_not_found_{safe_filename(email)}_{int(time.time())}.png"
             shot_path = screenshot(sb, shot_name)
             return "FAIL", None, _has_cf_clearance(sb), url_now, None, shot_path, False, "登录页表单未出现"
 
-        sb.clear(EMAIL_SEL)
-        sb.type(EMAIL_SEL, email)
-        sb.clear(PASS_SEL)
-        sb.type(PASS_SEL, password)
+        # 3. 强制填写邮箱和密码（使用 JS）
+        _force_input_value(sb, EMAIL_SEL, email)
+        _force_input_value(sb, PASS_SEL, password)
+        time.sleep(0.5)
 
-        _try_click_captcha(sb, "提交前")
+        # 4. 验证输入是否成功（可选，用于调试）
+        try:
+            email_val = sb.get_attribute(EMAIL_SEL, "value") or ""
+            print(f"📝 邮箱输入后值：{mask_email_keep_domain(email_val)}")
+        except Exception:
+            pass
 
-        # ★ 改用 uc_click 模拟真实点击
+        # 5. 提交前再次解决可能弹出的 Turnstile
+        _resolve_cf_challenge(sb)
+
+        # 6. 点击提交按钮（用 uc_click）
         print("🔘 点击登录按钮（uc_click）...")
         sb.uc_click(SUBMIT_SEL, reconnect_time=4)
         sb.wait_for_element_visible("body", timeout=30)
-        time.sleep(3)
+        time.sleep(4)
 
+        # 7. 提交后再检查验证码
         _try_click_captcha(sb, "提交后")
 
         has_cf = _has_cf_clearance(sb)
         current_url = (sb.get_current_url() or "").strip()
 
-        # ★ 检查页面错误提示
+        # 8. 检查错误提示
         error_msg = _detect_login_error(sb)
         if error_msg:
             print(f"⚠️ 页面错误信息：{error_msg}")
 
+        # 9. 检测登录状态
         welcome_text = None
         logged_in = False
         for _ in range(10):
@@ -398,15 +432,14 @@ def login_then_flow_one_account(
             time.sleep(1)
 
         if not logged_in:
-            # ★ 登录失败，强制截图，让截图包含错误信息
             shot_name = f"FAIL_{safe_filename(email)}_{int(time.time())}.png"
             shot_path = screenshot(sb, shot_name)
-            fail_reason = f"未检测到登录成功标志"
+            fail_reason = "未检测到登录成功标志"
             if error_msg:
                 fail_reason += f" | 页面错误: {error_msg}"
             return "FAIL", welcome_text, has_cf, current_url, None, shot_path, False, fail_reason
 
-        # 登录成功，继续 server 流程
+        # 登录成功，进入 server 流程
         server_id, server_enter_ok, server_enter_reason = _post_login_visit(sb)
 
         try:
@@ -482,7 +515,6 @@ def main():
                     print(msg)
 
                     if tg_token and tg_chat:
-                        # 有截图用图片发送，没有则回退到文本
                         if shot_path and os.path.exists(shot_path):
                             tg_send_photo(shot_path, msg, tg_token, tg_chat)
                         else:
@@ -501,7 +533,6 @@ def main():
 
         summary = f"📌 本次批量完成：登录成功 {ok} / 失败 {fail}"
         print("\n" + summary)
-        # 不再发送 TG summary，避免重复两条通知
 
     finally:
         if display:
