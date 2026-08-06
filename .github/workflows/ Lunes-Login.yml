@@ -17,6 +17,89 @@ jobs:
       - name: 📥 Checkout repo
         uses: actions/checkout@v4
 
+      # ---------- Xray 代理 ----------
+      - name: 📦 Install Xray
+        run: |
+          XRAY_VERSION="v25.3.6"
+          echo "Installing Xray ${XRAY_VERSION}..."
+          wget -q "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip" -O xray.zip
+          SIZE=$(stat -c%s xray.zip)
+          if [ "$SIZE" -lt 1048576 ]; then
+            echo "ERROR: Xray download too small, likely failed"
+            exit 1
+          fi
+          unzip -q xray.zip -d xray-bin
+          chmod +x xray-bin/xray
+          sudo mv xray-bin/xray /usr/local/bin/xray
+          xray version
+
+      - name: ⚙️ Configure & Start Xray (SOCKS5 on 127.0.0.1:1080)
+        run: |
+          python3 -c "
+          import json, pathlib
+          cfg = {
+            'log': {'loglevel': 'warning'},
+            'inbounds': [{
+              'listen': '127.0.0.1',
+              'port': 1080,
+              'protocol': 'socks',
+              'settings': {'auth': 'noauth', 'udp': True},
+              'tag': 'socks-in'
+            }],
+            'outbounds': [
+              {
+                'protocol': 'vmess',
+                'settings': {
+                  'vnext': [{
+                    'address': 'cdns.doon.eu.org',
+                    'port': 443,
+                    'users': [{
+                      'id': 'cccbaba2-d61b-7b11-13ce-53293c4822d1',
+                      'alterId': 0,
+                      'security': 'auto'
+                    }]
+                  }]
+                },
+                'streamSettings': {
+                  'network': 'ws',
+                  'security': 'tls',
+                  'tlsSettings': {
+                    'serverName': 'lunes.oxxo.de5.net',
+                    'allowInsecure': False
+                  },
+                  'wsSettings': {
+                    'path': '/vmess-argo?ed=2560',
+                    'headers': {'Host': 'lunes.oxxo.de5.net'}
+                  }
+                },
+                'tag': 'vmess-out'
+              },
+              {
+                'protocol': 'freedom',
+                'tag': 'direct'
+              }
+            ],
+            'routing': {
+              'rules': [{
+                'type': 'field',
+                'inboundTag': ['socks-in'],
+                'outboundTag': 'vmess-out'
+              }]
+            }
+          }
+          pathlib.Path('/tmp/xray-config.json').write_text(json.dumps(cfg))
+          "
+          xray -config /tmp/xray-config.json > /tmp/xray.log 2>&1 &
+          # 等待 Xray 端口就绪
+          for i in $(seq 1 20); do
+            nc -z 127.0.0.1 1080 2>/dev/null && echo "Xray ready" && break
+            echo "Waiting $i/20..." && sleep 1
+          done
+          # 测试代理出口 IP
+          PROXY_IP=$(curl -s --socks5 127.0.0.1:1080 --max-time 20 https://api.ipify.org || echo "failed")
+          echo "Proxy exit IP: $PROXY_IP"
+      # --------------------------------
+
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
@@ -32,6 +115,7 @@ jobs:
       - name: 🚀 Run login script
         env:
           ACCOUNTS_BATCH: ${{ secrets.ACCOUNTS_BATCH }}
+          PROXY_URL: socks5://127.0.0.1:1080   # 告诉 Python 脚本使用此代理
         run: |
           python login.py
 
@@ -44,13 +128,15 @@ jobs:
           path: |
             screenshots/*.png
 
-      # ⏱️ 提交 time.txt 到仓库(用于解决60天无文件变化的限制)
+      # ⏱️ 提交 time.txt 防止仓库 60 天无活动被停用
       - name: Commit time.txt to repo
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git reset --soft origin/main
 
           if [ ! -f time.txt ]; then
             echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
@@ -59,7 +145,6 @@ jobs:
           fi
 
           git add time.txt
-
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
           else
