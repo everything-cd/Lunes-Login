@@ -207,6 +207,27 @@ def _try_click_captcha(sb: SB, stage: str):
         print(f"⚠️ captcha 点击异常（{stage}）：{e}")
 
 
+def _detect_login_error(sb: SB) -> str:
+    """检查页面常见的错误提示，返回文本（用于调试）"""
+    error_selectors = [
+        ".alert-danger",
+        ".toast-error",
+        "#error",
+        ".form-error",
+        ".invalid-feedback",
+        'div[role="alert"]',
+    ]
+    for sel in error_selectors:
+        try:
+            if sb.is_element_visible(sel):
+                text = sb.get_text(sel)
+                if text and text.strip():
+                    return f"{sel}: {text.strip()}"
+        except Exception:
+            pass
+    return ""
+
+
 def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
     welcome_text = None
     try:
@@ -340,7 +361,10 @@ def login_then_flow_one_account(
             sb.wait_for_element_visible(SUBMIT_SEL, timeout=25)
         except Exception:
             url_now = sb.get_current_url() or ""
-            return "FAIL", None, _has_cf_clearance(sb), url_now, None, None, False, "登录页表单未出现"
+            # 表单都没出现，截图返回
+            shot_name = f"FAIL_form_not_found_{safe_filename(email)}_{int(time.time())}.png"
+            shot_path = screenshot(sb, shot_name)
+            return "FAIL", None, _has_cf_clearance(sb), url_now, None, shot_path, False, "登录页表单未出现"
 
         sb.clear(EMAIL_SEL)
         sb.type(EMAIL_SEL, email)
@@ -349,14 +373,21 @@ def login_then_flow_one_account(
 
         _try_click_captcha(sb, "提交前")
 
-        sb.click(SUBMIT_SEL)
+        # ★ 改用 uc_click 模拟真实点击
+        print("🔘 点击登录按钮（uc_click）...")
+        sb.uc_click(SUBMIT_SEL, reconnect_time=4)
         sb.wait_for_element_visible("body", timeout=30)
-        time.sleep(2)
+        time.sleep(3)
 
         _try_click_captcha(sb, "提交后")
 
         has_cf = _has_cf_clearance(sb)
         current_url = (sb.get_current_url() or "").strip()
+
+        # ★ 检查页面错误提示
+        error_msg = _detect_login_error(sb)
+        if error_msg:
+            print(f"⚠️ 页面错误信息：{error_msg}")
 
         welcome_text = None
         logged_in = False
@@ -367,9 +398,15 @@ def login_then_flow_one_account(
             time.sleep(1)
 
         if not logged_in:
-            return "FAIL", welcome_text, has_cf, current_url, None, None, False, "未检测到登录成功标志"
+            # ★ 登录失败，强制截图，让截图包含错误信息
+            shot_name = f"FAIL_{safe_filename(email)}_{int(time.time())}.png"
+            shot_path = screenshot(sb, shot_name)
+            fail_reason = f"未检测到登录成功标志"
+            if error_msg:
+                fail_reason += f" | 页面错误: {error_msg}"
+            return "FAIL", welcome_text, has_cf, current_url, None, shot_path, False, fail_reason
 
-        # 到这里即视为登录成功
+        # 登录成功，继续 server 流程
         server_id, server_enter_ok, server_enter_reason = _post_login_visit(sb)
 
         try:
@@ -445,7 +482,11 @@ def main():
                     print(msg)
 
                     if tg_token and tg_chat:
-                        tg_send_text(msg, tg_token, tg_chat)
+                        # 有截图用图片发送，没有则回退到文本
+                        if shot_path and os.path.exists(shot_path):
+                            tg_send_photo(shot_path, msg, tg_token, tg_chat)
+                        else:
+                            tg_send_text(msg, tg_token, tg_chat)
 
             except Exception as e:
                 fail += 1
