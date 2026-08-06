@@ -11,24 +11,12 @@ from pyvirtualdisplay import Display
 
 """
 批量登录 https://betadash.lunes.host/login?next=/
-登录成功后：
-  0) 从登录成功后的“Manage Servers”界面里，找到 <a href="/servers/63585" class="server-card">
-     - 提取 href 里的数字作为 server_id（例如 63585）
-     - 点击该 a（或 open 对应 URL），进入 server 控制台页
-  1) server 页停留 4-6 秒
-  2) 登录成功后截图
-  3) 发 TG：截图 + 说明文字
-  4) 不执行退出
-
-注意：
-- “登录成功” 与 “进入 server 页成功” 分开统计
-- 只要出现 Welcome back / logout 按钮，就判定为登录成功
-- server 页即使失败，也不会把整次登录记为失败
-
-环境变量：
-- ACCOUNTS_BATCH（多行，每行一套，英文逗号分隔）
-    格式：email,password 或 email,password,tg_bot_token,tg_chat_id
-- PROXY_URL（可选） 代理地址，例如 socks5://127.0.0.1:1080
+流程（严格按顺序，不主动刷新）：
+  1) 打开网站 → 等 1 秒
+  2) 输入账号密码 → 等 1 秒 → 截图 step1
+  3) 点击 CF 验证 → 截图 step2
+  4) 点击登录 → 等待结果 → 截图 step3（最终）
+  5) 判断登录成功/失败
 """
 
 LOGIN_URL = "https://betadash.lunes.host/login?next=/"
@@ -37,18 +25,11 @@ SERVER_URL_TPL = "https://betadash.lunes.host/servers/{server_id}"
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-# 登录表单选择器
 EMAIL_SEL = "#email"
 PASS_SEL = "#password"
 SUBMIT_SEL = 'button.submit-btn[type="submit"]'
-
-# 登录成功特征之一
 LOGOUT_SEL = 'a[href="/logout"].action-btn.ghost'
-
-# server 页面加载标志之一
 NOW_MANAGING_XPATH = 'xpath=//p[contains(normalize-space(.), "Now managing")]'
-
-# 服务器卡片
 SERVER_CARD_LINK_SEL = 'a.server-card[href^="/servers/"]'
 
 
@@ -89,56 +70,37 @@ def screenshot(sb, name: str) -> str:
     return path
 
 
-def tg_send_text(text: str, token: Optional[str] = None, chat_id: Optional[str] = None):
+def tg_send_text(text: str, token: str = None, chat_id: str = None):
     token = (token or "").strip()
     chat_id = (chat_id or "").strip()
     if not token or not chat_id:
         return
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
             timeout=20,
-        ).raise_for_status()
+        )
     except Exception as e:
         print(f"⚠️ TG 文本发送失败：{e}")
 
 
-def tg_send_photo(
-    photo_path: str,
-    caption: str,
-    token: Optional[str] = None,
-    chat_id: Optional[str] = None,
-):
+def tg_send_photo(photo_path: str, caption: str, token: str = None, chat_id: str = None):
     token = (token or "").strip()
     chat_id = (chat_id or "").strip()
     if not token or not chat_id:
         return
-
     if not photo_path or not os.path.exists(photo_path):
-        print(f"⚠️ TG 图片发送失败：文件不存在 -> {photo_path}")
         tg_send_text(caption, token, chat_id)
         return
-
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
     try:
         with open(photo_path, "rb") as f:
             requests.post(
-                url,
-                data={
-                    "chat_id": chat_id,
-                    "caption": caption[:1024],
-                    "disable_notification": False,
-                },
+                f"https://api.telegram.org/bot{token}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption[:1024]},
                 files={"photo": f},
                 timeout=60,
-            ).raise_for_status()
+            )
     except Exception as e:
         print(f"⚠️ TG 图片发送失败：{e}")
         tg_send_text(caption, token, chat_id)
@@ -147,41 +109,23 @@ def tg_send_photo(
 def build_accounts_from_env() -> List[Dict[str, str]]:
     batch = (os.getenv("ACCOUNTS_BATCH") or "").strip()
     if not batch:
-        raise RuntimeError("❌ 缺少环境变量：请设置 ACCOUNTS_BATCH（即使只有一个账号也用它）")
-
-    accounts: List[Dict[str, str]] = []
-    for idx, raw in enumerate(batch.splitlines(), start=1):
+        raise RuntimeError("❌ 缺少环境变量：ACCOUNTS_BATCH")
+    accounts = []
+    for idx, raw in enumerate(batch.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-
         parts = [p.strip() for p in line.split(",")]
-
         if len(parts) not in (2, 4):
-            raise RuntimeError(
-                f"❌ ACCOUNTS_BATCH 第 {idx} 行格式不对（必须是 email,password 或 "
-                f"email,password,tg_bot_token,tg_chat_id）：{raw!r}"
-            )
-
+            raise RuntimeError(f"❌ 第{idx}行格式错误：{raw!r}")
         email, password = parts[0], parts[1]
         tg_token = parts[2] if len(parts) == 4 else ""
         tg_chat = parts[3] if len(parts) == 4 else ""
-
         if not email or not password:
-            raise RuntimeError(f"❌ ACCOUNTS_BATCH 第 {idx} 行存在空字段：{raw!r}")
-
-        accounts.append(
-            {
-                "email": email,
-                "password": password,
-                "tg_token": tg_token,
-                "tg_chat": tg_chat,
-            }
-        )
-
+            raise RuntimeError(f"❌ 第{idx}行空字段：{raw!r}")
+        accounts.append({"email": email, "password": password, "tg_token": tg_token, "tg_chat": tg_chat})
     if not accounts:
-        raise RuntimeError("❌ ACCOUNTS_BATCH 里没有有效账号行（空行/注释行不算）")
-
+        raise RuntimeError("❌ 无有效账号")
     return accounts
 
 
@@ -189,88 +133,47 @@ def _has_cf_clearance(sb: SB) -> bool:
     try:
         cookies = sb.get_cookies()
         cf_clearance = next((c["value"] for c in cookies if c.get("name") == "cf_clearance"), None)
-        print("🧩 cf_clearance:", "OK" if cf_clearance else "NONE")
         return bool(cf_clearance)
-    except Exception:
+    except:
         return False
 
 
-def _force_input_value(sb: SB, selector: str, value: str):
-    """通过 JavaScript 强制设置输入框的值并触发 input 事件"""
-    sb.execute_script(
-        """
-        var el = document.querySelector(arguments[0]);
-        if(el) {
-            el.value = arguments[1];
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        """,
-        selector,
-        value,
-    )
-
-
-def _try_click_captcha(sb: SB, stage: str):
-    """尝试点击 Cloudflare Turnstile 验证框"""
+def _try_click_captcha(sb: SB):
+    """点击一次 CF 验证框"""
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
-        print(f"   ✅ captcha 点击完成（{stage}）")
+        print("   ✅ 已点击 CF 验证框")
     except Exception as e:
-        print(f"   ⚠️ captcha 点击异常（{stage}）：{e}")
-
-
-def _resolve_cf_challenge(sb: SB):
-    """反复尝试解决 Cloudflare 挑战，直到 cf_clearance 出现"""
-    print("🛡️ 正在解决 Cloudflare 挑战...")
-    for i in range(5):
-        if _has_cf_clearance(sb):
-            print("   ✅ 已有 cf_clearance")
-            return
-        _try_click_captcha(sb, f"循环 {i+1}")
-        time.sleep(2)
-    print("   ⚠️ 多次尝试后仍未获得 cf_clearance")
+        print(f"   ⚠️ 点击 CF 验证框异常：{e}")
 
 
 def _detect_login_error(sb: SB) -> str:
-    """检查页面常见的错误提示"""
-    error_selectors = [
-        ".alert-danger",
-        ".toast-error",
-        "#error",
-        ".form-error",
-        ".invalid-feedback",
-        'div[role="alert"]',
-    ]
-    for sel in error_selectors:
+    for sel in [".alert-danger", ".toast-error", "#error", ".form-error", ".invalid-feedback", 'div[role="alert"]']:
         try:
             if sb.is_element_visible(sel):
                 text = sb.get_text(sel)
                 if text and text.strip():
                     return f"{sel}: {text.strip()}"
-        except Exception:
+        except:
             pass
     return ""
 
 
 def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
-    welcome_text = None
     try:
         if sb.is_element_visible("h1.hero-title"):
-            welcome_text = (sb.get_text("h1.hero-title") or "").strip()
-            if "welcome back" in welcome_text.lower():
-                return True, welcome_text
-    except Exception:
+            welcome = sb.get_text("h1.hero-title").strip()
+            if "welcome back" in welcome.lower():
+                return True, welcome
+    except:
         pass
-
     try:
         if sb.is_element_visible(LOGOUT_SEL):
-            return True, welcome_text
-    except Exception:
+            return True, None
+    except:
         pass
-
-    return False, welcome_text
+    return False, None
 
 
 def _extract_server_id_from_href(href: str) -> Optional[str]:
@@ -283,102 +186,70 @@ def _extract_server_id_from_href(href: str) -> Optional[str]:
 def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool, str]:
     try:
         sb.wait_for_element_visible(SERVER_CARD_LINK_SEL, timeout=25)
-    except Exception:
+    except:
         screenshot(sb, f"server_card_not_found_{int(time.time())}.png")
         return None, False, "server-card 未出现"
-
     try:
         href = sb.get_attribute(SERVER_CARD_LINK_SEL, "href") or ""
-    except Exception:
+    except:
         href = ""
-
     server_id = _extract_server_id_from_href(href)
     if not server_id:
         screenshot(sb, f"server_id_extract_failed_{int(time.time())}.png")
-        return None, False, "无法从 href 提取 server_id"
-
+        return None, False, "无法提取 server_id"
     server_url = SERVER_URL_TPL.format(server_id=server_id)
-
     try:
-        print(f"🧭 提取到 server_id={server_id}，点击 server-card 跳转...")
+        print(f"🧭 提取到 server_id={server_id}，跳转...")
         sb.scroll_to(SERVER_CARD_LINK_SEL)
         time.sleep(0.3)
         sb.click(SERVER_CARD_LINK_SEL)
     except Exception as e:
-        print(f"⚠️ 点击跳转失败，改为直接打开：{server_url} | {e}")
+        print(f"⚠️ 点击失败，直接打开：{server_url} | {e}")
         try:
             sb.open(server_url)
         except Exception as e2:
             screenshot(sb, f"goto_server_open_failed_{int(time.time())}.png")
-            return server_id, False, f"打开 server_url 失败: {e2}"
-
+            return server_id, False, f"打开失败: {e2}"
     for _ in range(30):
         try:
             cur = (sb.get_current_url() or "").strip()
-        except Exception:
+        except:
             cur = ""
-
         if f"/servers/{server_id}" in cur:
-            try:
-                if sb.is_element_visible(NOW_MANAGING_XPATH):
-                    return server_id, True, "URL 正确，且 Now managing 已出现"
-            except Exception:
-                pass
-
-            try:
-                if sb.is_element_visible("body"):
-                    return server_id, True, "URL 已进入 server 页"
-            except Exception:
-                pass
-
+            if sb.is_element_visible(NOW_MANAGING_XPATH):
+                return server_id, True, "Now managing 已出现"
+            if sb.is_element_visible("body"):
+                return server_id, True, "URL 已进入 server 页"
         time.sleep(1)
-
     screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
-    return server_id, False, "30 秒内未稳定识别到 server 页"
+    return server_id, False, "30秒内未识别 server 页"
 
 
 def _post_login_visit(sb: SB) -> Tuple[Optional[str], bool, str]:
-    server_id, entered_ok, reason = _find_server_id_and_go_server_page(sb)
-
-    if entered_ok:
-        stay1 = random.randint(4, 6)
-        print(f"⏳ 服务器页停留 {stay1} 秒...")
-        time.sleep(stay1)
-
-    return server_id, entered_ok, reason
+    server_id, ok, reason = _find_server_id_and_go_server_page(sb)
+    if ok:
+        stay = random.randint(4, 6)
+        print(f"⏳ 停留 {stay} 秒...")
+        time.sleep(stay)
+    return server_id, ok, reason
 
 
 def login_then_flow_one_account(
     email: str, password: str
 ) -> Tuple[str, Optional[str], bool, str, Optional[str], Optional[str], bool, str]:
-    """
-    返回：
-      (
-        status,              # OK / FAIL
-        welcome_text,
-        has_cf_clearance,
-        current_url,
-        server_id,
-        screenshot_path,
-        server_enter_ok,
-        server_enter_reason,
-      )
-    """
-    # 读取代理环境变量（如果未设置则为 None，直连）
     proxy_url = os.getenv("PROXY_URL")
     if proxy_url:
         print(f"🌐 使用代理：{proxy_url}")
 
+    safe_email = mask_email_keep_domain(email)
     with SB(uc=True, locale="en", test=True, proxy=proxy_url) as sb:
         print("🚀 浏览器启动（UC Mode）")
 
+        # -------------------- 1. 打开网站，等1秒 --------------------
         sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5.0)
-        time.sleep(3)
+        time.sleep(1)
 
-        # 1. 先解决 Cloudflare 挑战
-        _resolve_cf_challenge(sb)
-
-        # 2. 确认表单元素可见
+        # 等待表单出现
         try:
             sb.wait_for_element_visible(EMAIL_SEL, timeout=20)
             sb.wait_for_element_visible(PASS_SEL, timeout=10)
@@ -386,45 +257,69 @@ def login_then_flow_one_account(
             print("✅ 登录表单已加载")
         except Exception:
             url_now = sb.get_current_url() or ""
-            shot_name = f"FAIL_form_not_found_{safe_filename(email)}_{int(time.time())}.png"
-            shot_path = screenshot(sb, shot_name)
-            return "FAIL", None, _has_cf_clearance(sb), url_now, None, shot_path, False, "登录页表单未出现"
+            shot_path = screenshot(sb, f"FAIL_form_not_found_{safe_filename(email)}_{int(time.time())}.png")
+            return "FAIL", None, _has_cf_clearance(sb), url_now, None, shot_path, False, "表单未出现"
 
-        # 3. 强制填写邮箱和密码（使用 JS）
-        _force_input_value(sb, EMAIL_SEL, email)
-        _force_input_value(sb, PASS_SEL, password)
-        time.sleep(1)
+        # -------------------- 2. 输入账号密码 --------------------
+        try:
+            sb.click(EMAIL_SEL)
+            time.sleep(0.2)
+            sb.clear(EMAIL_SEL)
+            sb.type(EMAIL_SEL, email)
 
-        # 调试：确认输入的值
+            sb.click(PASS_SEL)
+            time.sleep(0.2)
+            sb.clear(PASS_SEL)
+            sb.type(PASS_SEL, password)
+
+            print(f"📝 账号已输入：{safe_email}")
+        except Exception as e:
+            print(f"⚠️ 输入异常，尝试备用 JS：{e}")
+            sb.execute_script(f"document.querySelector('{EMAIL_SEL}').value = '{email}';")
+            sb.execute_script(f"document.querySelector('{PASS_SEL}').value = '{password}';")
+            sb.execute_script("document.querySelector('{EMAIL_SEL}').dispatchEvent(new Event('input', {bubbles: true}));")
+            sb.execute_script("document.querySelector('{PASS_SEL}').dispatchEvent(new Event('input', {bubbles: true}));")
+
+        time.sleep(1)  # 等待 1 秒
+
+        # 验证输入值（调试用）
         try:
             email_val = sb.get_attribute(EMAIL_SEL, "value") or ""
-            print(f"📝 邮箱输入后值：{mask_email_keep_domain(email_val)}")
-        except Exception:
+            print(f"🔍 当前邮箱框内容：{mask_email_keep_domain(email_val)}")
+        except:
             pass
 
-        # 4. 提交前再次解决可能弹出的 Turnstile
-        _resolve_cf_challenge(sb)
+        # ★ 截图：输入后
+        step1_shot = screenshot(sb, f"STEP1_after_input_{safe_filename(email)}_{int(time.time())}.png")
 
-        # 5. 点击提交按钮（用 uc_click）
-        print("🔘 提交表单...")
+        # -------------------- 3. 点击 CF 验证 --------------------
+        _try_click_captcha(sb)
+        time.sleep(1)  # 给验证框一点反应时间
+
+        # ★ 截图：CF 验证后
+        step2_shot = screenshot(sb, f"STEP2_after_cf_{safe_filename(email)}_{int(time.time())}.png")
+
+        # -------------------- 4. 点击登录 --------------------
+        print("🔘 点击登录按钮（uc_click）...")
         sb.uc_click(SUBMIT_SEL, reconnect_time=4)
         sb.wait_for_element_visible("body", timeout=30)
         time.sleep(4)
 
-        # 6. 提交后再检查验证码
-        _try_click_captcha(sb, "提交后")
+        # 提交后再尝试点击一次验证（防止延迟弹出）
+        _try_click_captcha(sb)
 
+        # ★ 截图：登录后（最终）
+        step3_shot = screenshot(sb, f"STEP3_after_login_{safe_filename(email)}_{int(time.time())}.png")
+
+        # -------------------- 5. 判断结果 --------------------
         has_cf = _has_cf_clearance(sb)
         current_url = (sb.get_current_url() or "").strip()
-
-        # 7. 检查页面错误提示
         error_msg = _detect_login_error(sb)
         if error_msg:
             print(f"⚠️ 页面错误信息：{error_msg}")
 
-        # 8. 检测登录状态
-        welcome_text = None
         logged_in = False
+        welcome_text = None
         for _ in range(10):
             logged_in, welcome_text = _is_logged_in(sb)
             if logged_in:
@@ -432,26 +327,22 @@ def login_then_flow_one_account(
             time.sleep(1)
 
         if not logged_in:
-            # ★ 登录失败，强制截图
-            shot_name = f"FAIL_{safe_filename(email)}_{int(time.time())}.png"
-            shot_path = screenshot(sb, shot_name)
-            fail_reason = "未检测到登录成功标志"
+            reason = "未检测到登录成功标志"
             if error_msg:
-                fail_reason += f" | 页面错误: {error_msg}"
-            return "FAIL", welcome_text, has_cf, current_url, None, shot_path, False, fail_reason
+                reason += f" | 错误: {error_msg}"
+            return "FAIL", welcome_text, has_cf, current_url, None, step3_shot, False, reason
 
-        # 登录成功，继续 server 流程
-        server_id, server_enter_ok, server_enter_reason = _post_login_visit(sb)
+        # 登录成功，继续服务器页面流程
+        server_id, server_ok, server_reason = _post_login_visit(sb)
 
         try:
-            current_url = (sb.get_current_url() or "").strip()
-        except Exception:
+            current_url = sb.get_current_url().strip()
+        except:
             pass
 
-        shot_name = f"{safe_filename(email)}_{server_id or 'no_server'}_{int(time.time())}.png"
-        shot_path = screenshot(sb, shot_name)
-
-        return "OK", welcome_text, has_cf, current_url, server_id, shot_path, server_enter_ok, server_enter_reason
+        # 成功后也保存一张最终截图（可能包含服务器页面）
+        final_shot = screenshot(sb, f"OK_{safe_filename(email)}_{server_id or 'no_server'}_{int(time.time())}.png")
+        return "OK", welcome_text, has_cf, current_url, server_id, final_shot, server_ok, server_reason
 
 
 def main():
@@ -460,13 +351,12 @@ def main():
 
     ok = 0
     fail = 0
-
     try:
-        for i, acc in enumerate(accounts, start=1):
+        for i, acc in enumerate(accounts, 1):
             email = acc["email"]
             password = acc["password"]
-            tg_token = (acc.get("tg_token") or "").strip()
-            tg_chat = (acc.get("tg_chat") or "").strip()
+            tg_token = acc.get("tg_token", "").strip()
+            tg_chat = acc.get("tg_chat", "").strip()
 
             safe_email = mask_email_keep_domain(email)
 
@@ -475,56 +365,45 @@ def main():
             print("=" * 70)
 
             try:
-                (
-                    status,
-                    welcome_text,
-                    has_cf,
-                    url_now,
-                    server_id,
-                    shot_path,
-                    server_enter_ok,
-                    server_enter_reason,
-                ) = login_then_flow_one_account(email, password)
-
+                (status, welcome, cf_ok, url, srv_id, shot, srv_ok, srv_reason) = login_then_flow_one_account(
+                    email, password
+                )
                 if status == "OK":
                     ok += 1
                     msg = (
                         f"✅ Lunes BetaDash 登录成功\n"
                         f"账号：{safe_email}\n"
-                        f"server_id：{server_id or '未提取到'}\n"
-                        f"welcome：{welcome_text or '未读取到'}\n"
-                        f"server页面：{'✅ 成功' if server_enter_ok else '❌ 失败'}\n"
-                        f"说明：{server_enter_reason}\n"
-                        f"当前页：{url_now}\n"
-                        f"cf_clearance：{'OK' if has_cf else 'NONE'}"
+                        f"server_id：{srv_id or '未提取'}\n"
+                        f"welcome：{welcome or '未读取'}\n"
+                        f"server页面：{'✅' if srv_ok else '❌'}\n"
+                        f"说明：{srv_reason}\n"
+                        f"当前页：{url}\n"
+                        f"cf_clearance：{'OK' if cf_ok else 'NONE'}"
                     )
                     print(msg)
-
                     if tg_token and tg_chat:
-                        tg_send_photo(shot_path, msg, tg_token, tg_chat)
+                        tg_send_photo(shot, msg, tg_token, tg_chat)
 
                 else:
                     fail += 1
                     msg = (
                         f"❌ Lunes BetaDash 登录失败\n"
                         f"账号：{safe_email}\n"
-                        f"welcome：{welcome_text or '未检测到'}\n"
-                        f"当前页：{url_now}\n"
-                        f"cf_clearance：{'OK' if has_cf else 'NONE'}\n"
-                        f"说明：{server_enter_reason}"
+                        f"welcome：{welcome or '未检测'}\n"
+                        f"当前页：{url}\n"
+                        f"cf_clearance：{'OK' if cf_ok else 'NONE'}\n"
+                        f"说明：{srv_reason}"
                     )
                     print(msg)
-
                     if tg_token and tg_chat:
-                        # 有截图用图片发送，没有则回退到文本
-                        if shot_path and os.path.exists(shot_path):
-                            tg_send_photo(shot_path, msg, tg_token, tg_chat)
+                        if shot and os.path.exists(shot):
+                            tg_send_photo(shot, msg, tg_token, tg_chat)
                         else:
                             tg_send_text(msg, tg_token, tg_chat)
 
             except Exception as e:
                 fail += 1
-                msg = f"❌ Lunes BetaDash 脚本异常\n账号：{safe_email}\n错误：{e}"
+                msg = f"❌ 脚本异常\n账号：{safe_email}\n错误：{e}"
                 print(msg)
                 if tg_token and tg_chat:
                     tg_send_text(msg, tg_token, tg_chat)
@@ -533,9 +412,7 @@ def main():
             if i < len(accounts):
                 time.sleep(5)
 
-        summary = f"📌 本次批量完成：登录成功 {ok} / 失败 {fail}"
-        print("\n" + summary)
-
+        print(f"\n📌 本次批量完成：登录成功 {ok} / 失败 {fail}")
     finally:
         if display:
             display.stop()
