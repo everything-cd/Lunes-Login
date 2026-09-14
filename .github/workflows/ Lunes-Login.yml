@@ -48,15 +48,15 @@ jobs:
             }],
             'outbounds': [
               {
-                'protocol': 'vmess',
+                'protocol': 'vless',
                 'settings': {
                   'vnext': [{
-                    'address': 'cdns.doon.eu.org',
-                    'port': 443,
+                    'address': 'shopify.com',
+                    'port': 2083,
                     'users': [{
-                      'id': 'cccbaba2-d61b-7b11-13ce-53293c4822d1',
-                      'alterId': 0,
-                      'security': 'auto'
+                      'id': '3f34622f-1199-4f2a-8c6b-72893ce3527e',
+                      'encryption': 'none',
+                      'flow': ''
                     }]
                   }]
                 },
@@ -64,15 +64,15 @@ jobs:
                   'network': 'ws',
                   'security': 'tls',
                   'tlsSettings': {
-                    'serverName': 'lunes.oxxo.de5.net',
+                    'serverName': '20.fnos9527.de5.net',
                     'allowInsecure': False
                   },
                   'wsSettings': {
-                    'path': '/vmess-argo?ed=2560',
-                    'headers': {'Host': 'lunes.oxxo.de5.net'}
+                    'path': '/',
+                    'headers': {'Host': '20.fnos9527.de5.net'}
                   }
                 },
-                'tag': 'vmess-out'
+                'tag': 'vless-out'
               },
               {
                 'protocol': 'freedom',
@@ -83,7 +83,7 @@ jobs:
               'rules': [{
                 'type': 'field',
                 'inboundTag': ['socks-in'],
-                'outboundTag': 'vmess-out'
+                'outboundTag': 'vless-out'
               }]
             }
           }
